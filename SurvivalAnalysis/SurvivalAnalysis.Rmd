@@ -1,0 +1,511 @@
+---
+title: "Survival Differences Across PAM50 Subtypes in Breast Cancer"
+author: "Jessica Ho"
+date: "2025-06-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(haven)
+library(dplyr)
+library(ggplot2)
+library(survival)
+library(survminer)
+library(pander)
+library(gtsummary)
+library(tidycmprsk)
+library(ggsurvfit)
+```
+
+```{r}
+dat <- read.csv('/Users/jessica/Documents/UCSF Spring 2025/BIOSTAT209/SurvivalAnalysis/brca_metabric_clinical_data.csv')
+head(dat)
+str(dat)
+
+# Checking missing data in each column
+colSums(is.na(dat))
+
+# Filter to rows with complete survival outcome: Drop rows with missing survival time or status
+dat <- dat %>% 
+  filter(!is.na(Overall.Survival..Months.) & !is.na(Overall.Survival.Status))
+
+# clean outcome
+survival_data <- dat %>%
+  mutate(status = ifelse(grepl("1:DECEASED", Overall.Survival.Status), 1, 0),
+         time = Overall.Survival..Months.)
+```
+
+```{r}
+model_df <- subset(survival_data, !is.na(time) & !is.na(status) &
+                      !is.na(Pam50...Claudin.low.subtype) &
+                      !is.na(Age.at.Diagnosis) &
+                      !is.na(Tumor.Size) &
+                      !is.na(Neoplasm.Histologic.Grade))
+
+# Convert subtype to factor with reference at LumA
+model_df$PAM50 <- factor(model_df$Pam50...Claudin.low.subtype)
+model_df$PAM50 <- relevel(model_df$PAM50, ref = "LumA")  # you can change reference subtype
+
+model_df <- model_df %>% filter(PAM50 != "NC")
+```
+
+```{r}
+# Fit Cox model
+cox_model <- coxph(Surv(time, status) ~ PAM50 + Age.at.Diagnosis + Tumor.Size + Neoplasm.Histologic.Grade, data = model_df)
+
+summary(cox_model)
+ph.test <- cox.zph(cox_model)
+ph.test
+plot(ph.test, var = "PAM50")
+abline(h = 0, col = "red")
+```
+
+
+```{r}
+# Fit survival curve
+km_fit <- survfit(Surv(time, status) ~ PAM50, data = model_df)
+
+# Plot KM curves
+ggsurvplot(km_fit, data = model_df, pval = TRUE,
+           risk.table = TRUE, 
+           title = "Kaplan-Meier Curve",
+           legend.title = "PAM50 Subtype",
+           xlab = "Time (months)",
+           ylab = "Overall Survival Probability")
+```
+
+```{r}
+model_df$AgeGroup <- cut(model_df$Age.at.Diagnosis, 
+                         breaks = c(0, 40, 50, 60, 70, Inf), 
+                         labels = c("<40", "40–49", "50–59", "60–69", "70+"), 
+                         right = FALSE)
+
+model_df$AgeGroup <- factor(model_df$AgeGroup)
+model_df$Neoplasm.Histologic.Grade <- factor(model_df$Neoplasm.Histologic.Grade)
+```
+
+```{r}
+# Fit your Cox model (you already have this part)
+mod <- coxph(Surv(time, status) ~ PAM50 + Tumor.Size + strata(AgeGroup, Neoplasm.Histologic.Grade), data = model_df)
+
+# Test the proportional hazards assumption
+ph_test <- cox.zph(mod)
+
+# Plot scaled Schoenfeld residuals
+plot(ph_test, var = "PAM50")
+abline(h = 0, col = "red")
+
+
+```
+
+
+```{r}
+# Cap time at 170 months and adjust status accordingly
+model_df$time_capped <- pmin(model_df$time, 165)
+model_df$status_capped <- ifelse(model_df$time > 165, 0, model_df$status)
+
+# survSplit with 3 intervals: 0–40, 40–80, 80–170
+model_df_td <- survSplit(Surv(time_capped, status_capped) ~ ., 
+                         data = model_df, 
+                         cut = c(40, 80, 165),  
+                         episode = "grp", 
+                         start = "tstart")
+
+# Create binary indicators for PAM50 subtypes
+pam_levels <- levels(model_df_td$PAM50)
+ref_level <- pam_levels[1]
+other_levels <- pam_levels[pam_levels != ref_level]
+for (lvl in other_levels) {
+  model_df_td[[lvl]] <- as.numeric(model_df_td$PAM50 == lvl)
+}
+
+# Time-dependent interactions for LumB, Basal, Her2, Normal
+model_df_td$LumB_0_40    <- model_df_td$LumB   * (model_df_td$grp == 1)
+model_df_td$LumB_40_80   <- model_df_td$LumB   * (model_df_td$grp == 2)
+model_df_td$LumB_80_170  <- model_df_td$LumB   * (model_df_td$grp == 3)
+
+model_df_td$Basal_0_40    <- model_df_td$Basal   * (model_df_td$grp == 1)
+model_df_td$Basal_40_80   <- model_df_td$Basal   * (model_df_td$grp == 2)
+model_df_td$Basal_80_170  <- model_df_td$Basal   * (model_df_td$grp == 3)
+
+model_df_td$Her2_0_40    <- model_df_td$Her2   * (model_df_td$grp == 1)
+model_df_td$Her2_40_80   <- model_df_td$Her2   * (model_df_td$grp == 2)
+model_df_td$Her2_80_170  <- model_df_td$Her2   * (model_df_td$grp == 3)
+
+model_df_td$Normal_0_40    <- model_df_td$Normal   * (model_df_td$grp == 1)
+model_df_td$Normal_40_80   <- model_df_td$Normal   * (model_df_td$grp == 2)
+model_df_td$Normal_80_170  <- model_df_td$Normal   * (model_df_td$grp == 3)
+
+model_df_td$Claudin_low_0_40   <- model_df_td$`claudin-low` * (model_df_td$grp == 1)
+model_df_td$Claudin_low_40_80  <- model_df_td$`claudin-low` * (model_df_td$grp == 2)
+model_df_td$Claudin_low_80_170 <- model_df_td$`claudin-low` * (model_df_td$grp == 3)
+
+# Final Cox model including Claudin-low
+cox_td_model <- coxph(Surv(tstart, time_capped, status_capped) ~
+                      LumB_0_40 + LumB_40_80 + LumB_80_170 +
+                      Basal_0_40 + Basal_40_80 + Basal_80_170 +
+                      Her2_0_40 + Her2_40_80 + Her2_80_170 +
+                      Normal_0_40 + Normal_40_80 + Normal_80_170 +
+                      Claudin_low_0_40 + Claudin_low_40_80 + Claudin_low_80_170 +
+                      Tumor.Size + strata(AgeGroup, Neoplasm.Histologic.Grade),
+                      data = model_df_td)
+
+
+# Check proportional hazards assumption
+cox.zph(cox_td_model)
+
+model_summary <- summary(cox_td_model)
+model_summary
+```
+
+```{r}
+# CHECKING LINEARITY OF PREDICTORS ASSUMPTION
+cox.null <- coxph(Surv(time, status) ~1, data = model_df_td)
+# linearity of predictor (tumor size)
+plot(model_df_td$Tumor.Size, resid(cox.null), xlab="Size (mm)",
+ylab="Martingale residuals",
+main="Martingale residuals vs lowess smoother (Tumor Size)") +
+lines(lowess(model_df_td$Tumor.Size, resid(cox.null)),col='red')
+
+
+# plot(model_df$Age.at.Diagnosis, resid(cox.null), xlab="Size (mm)",
+#      ylab="Martingale residuals",
+#      main="Martingale residuals vs lowess smoother (age)")+
+# lines(lowess(model_df$Age.at.Diagnosis, resid(cox.null)),col='red')
+
+library(splines)
+cox_spline <- coxph(Surv(time, status) ~ ns(Tumor.Size, df = 4), data = model_df_td)
+plot(predict(cox_spline, type = "terms"), model_df_td$Tumor.Size,
+     xlab = "Tumor Size", ylab = "Log Hazard",
+     main = "Spline Fit for Tumor Size")
+
+library(survival)
+library(rms)  # for rcs()
+
+# FINAL SPLINE MODEL
+cox_ns <- coxph(Surv(tstart, time_capped, status_capped) ~
+                      LumB_0_40 + LumB_40_80 + LumB_80_170 +
+                      Basal_0_40 + Basal_40_80 + Basal_80_170 +
+                      Her2_0_40 + Her2_40_80 + Her2_80_170 +
+                      Normal_0_40 + Normal_40_80 + Normal_80_170 +
+                      Claudin_low_0_40 + Claudin_low_40_80 + Claudin_low_80_170 +
+                      ns(Tumor.Size, df = 4) + strata(AgeGroup, Neoplasm.Histologic.Grade),
+                      data = model_df_td)
+
+
+# Create a sequence of Tumor Size values for prediction
+tumor_seq <- seq(min(model_df_td$Tumor.Size, na.rm = TRUE),
+                 max(model_df_td$Tumor.Size, na.rm = TRUE),
+                 length.out = 100)
+
+# Create a reference dataset with fixed covariates and varying Tumor Size
+new_data <- model_df_td[1, , drop = FALSE]  # take first row as template
+new_data <- new_data[rep(1, 100), ]         # replicate it 100 times
+new_data$Tumor.Size <- tumor_seq
+
+# Set other covariates to common values (e.g., 0 or reference group)
+new_data$LumB_0_40 <- 0
+new_data$LumB_40_80 <- 0
+new_data$LumB_80_170 <- 0
+new_data$Basal_0_40 <- 0
+new_data$Basal_40_80 <- 0
+new_data$Basal_80_170 <- 0
+new_data$Her2_0_40 <- 0
+new_data$Her2_40_80 <- 0
+new_data$Her2_80_170 <- 0
+new_data$Normal_0_40 <- 0
+new_data$Normal_40_80 <- 0
+new_data$Normal_80_170 <- 0
+
+# Predict the linear predictor (log hazard ratio)
+pred <- predict(cox_ns, newdata = new_data, type = "lp", se.fit = TRUE)
+
+# Plot log hazard ratio vs. Tumor Size
+plot(tumor_seq, pred$fit, type = "l", lwd = 2,
+     xlab = "Tumor Size (mm)", ylab = "Log Hazard Ratio",
+     main = "Effect of Tumor Size (Natural Splines)")
+# lines(tumor_seq, pred$fit + 1.96 * pred$se.fit, lty = 2, col = "grey")
+# lines(tumor_seq, pred$fit - 1.96 * pred$se.fit, lty = 2, col = "grey")
+abline(h = 0, lty = 3)
+
+
+
+# Linear model
+mod_linear <- coxph(Surv(tstart, time_capped, status_capped) ~
+                      LumB_0_40 + LumB_40_80 + LumB_80_170 +
+                      Basal_0_40 + Basal_40_80 + Basal_80_170 +
+                      Her2_0_40 + Her2_40_80 + Her2_80_170 +
+                      Normal_0_40 + Normal_40_80 + Normal_80_170 +
+                      Claudin_low_0_40 + Claudin_low_40_80 + Claudin_low_80_170 +
+                      Tumor.Size + strata(AgeGroup, Neoplasm.Histologic.Grade),
+                      data = model_df_td)
+
+# Nonlinear model using natural splines
+mod_spline <- coxph(Surv(tstart, time_capped, status_capped) ~
+                      LumB_0_40 + LumB_40_80 + LumB_80_170 +
+                      Basal_0_40 + Basal_40_80 + Basal_80_170 +
+                      Her2_0_40 + Her2_40_80 + Her2_80_170 +
+                      Normal_0_40 + Normal_40_80 + Normal_80_170 +
+                      Claudin_low_0_40 + Claudin_low_40_80 + Claudin_low_80_170 +
+                      ns(Tumor.Size, df = 4) + strata(AgeGroup, Neoplasm.Histologic.Grade),
+                      data = model_df_td)
+
+anova(mod_linear, mod_spline, test = "LRT")
+
+
+model_summary <- summary(cox_ns)
+model_summary 
+
+cox_no_tumor <- coxph(Surv(tstart, time_capped, status_capped) ~
+  LumB_0_40 + LumB_40_80 + LumB_80_170 +
+  Basal_0_40 + Basal_40_80 + Basal_80_170 +
+  Her2_0_40 + Her2_40_80 + Her2_80_170 +
+  Normal_0_40 + Normal_40_80 + Normal_80_170 +
+  strata(AgeGroup, Neoplasm.Histologic.Grade),
+  data = model_df_td)
+
+anova(cox_no_tumor, cox_ns, test = "LRT")
+
+```
+
+
+```{r}
+# Load necessary packages
+library(survival)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+
+
+pam50_results <- model_summary$coefficients[grep("PAM50", rownames(model_summary$coefficients)), , drop = FALSE]
+conf_int <- model_summary$conf.int[grep("PAM50", rownames(model_summary$conf.int)), , drop = FALSE]
+# 
+# pam50_table <- data.frame(
+#   Subtype = gsub("PAM50", "", rownames(pam50_results)),
+#   HR = round(pam50_results[, "exp(coef)"], 2),
+#   CI = paste0(round(conf_int[, "lower .95"], 2), " – ", round(conf_int[, "upper .95"], 2)),
+#   p_value = round(pam50_results[, "Pr(>|z|)"], 2),
+#   row.names = NULL
+# )
+
+# Add NC manually
+# pam50_table <- rbind(
+#   pam50_table,
+#   data.frame(Subtype = "NC", HR = NA, CI = "NA", p_value = NA)
+# )
+
+# Create publication-style table
+# pam50_table %>%
+#   kbl(
+#     col.names = c("Subtype", "HR (exp(coef))", "95% CI", "p-value"),
+#     align = c("l", "r", "c", "c"),
+#     caption = "Table 1. Hazard Ratios and 95% Confidence Intervals for PAM50 Subtypes"
+#   ) %>%
+#   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), 
+#                 full_width = FALSE, 
+#                 position = "left") %>%
+#   row_spec(0, bold = TRUE) #%>%
+#  # row_spec(nrow(pam50_table), italic = TRUE)
+
+##### This block of code make table including tumor size #######
+
+model_summary <- summary(cox_ns)
+coefs <- model_summary$coefficients
+conf_ints <- model_summary$conf.int
+
+results_table <- data.frame(
+  Variable = rownames(coefs),
+  HR = round(coefs[, "exp(coef)"], 2),
+  CI = paste0(round(conf_ints[, "lower .95"], 2), " – ", round(conf_ints[, "upper .95"], 2)),
+  p_value = round(coefs[, "Pr(>|z|)"], 3),
+  row.names = NULL
+)
+
+# Filter out the 'PAM50NC' row (adjust the name to match exactly)
+results_table <- results_table %>%
+  filter(!grepl("PAM50NC", Variable))
+
+results_table %>%
+  kbl(
+    col.names = c("Variable", "HR (exp(coef))", "95% CI", "p-value"),
+    align = c("l", "r", "c", "c"),
+    caption = "<b style='color:black;'>Table 1. Hazard Ratios for PAM50 Subtypes and Tumor Size</b>"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+
+```{r}
+library(dplyr)
+library(knitr)
+library(kableExtra)
+
+model_summary <- summary(cox_ns)
+coefs <- model_summary$coefficients
+conf_ints <- model_summary$conf.int
+
+# Full results table
+results_table <- data.frame(
+  Variable = rownames(coefs),
+  HR = round(coefs[, "exp(coef)"], 2),
+  CI = paste0(round(conf_ints[, "lower .95"], 2), " – ", round(conf_ints[, "upper .95"], 2)),
+  p_value = round(coefs[, "Pr(>|z|)"], 3),
+  row.names = NULL
+)
+
+# Table 1: PAM50 time-dependent variables only
+pam50_table <- results_table %>%
+  filter(grepl("LumB|Basal|Her2|Normal", Variable))
+
+pam50_table %>%
+  kbl(
+    col.names = c("Variable", "HR (exp(coef))", "95% CI", "p-value"),
+    align = c("l", "r", "c", "c"),
+    caption = "<b style='color:black;'>Table 1. Hazard Ratios for PAM50 Subtypes (Time-Dependent)</b>"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+
+
+# Assume cox_ns is your final spline model
+library(splines)
+library(survival)
+
+# Set reference tumor size
+ref_size <- 25
+tumor_sizes <- c(25, 50, 75, 100)
+
+# Build data frame for prediction
+newdata <- model_df_td[1, , drop = FALSE]  # Take first row as a template
+newdata <- newdata[rep(1, length(tumor_sizes)), ]
+newdata$Tumor.Size <- tumor_sizes
+
+# Set other covariates to reference values
+newdata[, grep("LumB|Basal|Her2|Normal", names(newdata))] <- 0
+newdata$AgeGroup <- model_df_td$AgeGroup[1]  # choose a reference stratum
+newdata$Neoplasm.Histologic.Grade <- model_df_td$Neoplasm.Histologic.Grade[1]
+
+# Predict log hazard and CI
+pred <- predict(cox_ns, newdata = newdata, type = "lp", se.fit = TRUE)
+HR <- exp(pred$fit - pred$fit[1])  # relative to Tumor Size = 25
+lower <- exp(pred$fit - pred$fit[1] - 1.96 * pred$se.fit)
+upper <- exp(pred$fit - pred$fit[1] + 1.96 * pred$se.fit)
+
+tumor_size_summary <- data.frame(
+  `Tumor Size (mm)` = tumor_sizes,
+  `Predicted HR vs. 25 mm` = round(HR, 2),
+  `95% CI` = paste0(round(lower, 2), " – ", round(upper, 2))
+)
+
+library(knitr)
+library(kableExtra)
+
+tumor_size_summary %>%
+  kbl(
+    caption = "<b style='color:black;'>Table 2. Predicted Hazard Ratios at Selected Tumor Sizes (Reference: 25 mm)</b>",
+    align = "c"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+```
+
+
+```{r}
+library(splines)
+library(survival)
+library(ggplot2)
+
+
+# View count of strata (unchanged)
+model_df_td %>%
+  count(AgeGroup, Neoplasm.Histologic.Grade, sort = TRUE)
+
+# Create a dataset of new values for tumor size
+newdata <- data.frame(Tumor.Size = seq(min(model_df_td$Tumor.Size, na.rm = TRUE),
+                                       max(model_df_td$Tumor.Size, na.rm = TRUE),
+                                       length.out = 100))
+
+# Set values for other covariates (constant or reference levels)
+newdata$tstart <- 0
+newdata$time_capped <- 60  # mid-follow-up time
+newdata$status_capped <- 1
+
+# Set all time-dependent indicators to 0 (represents Luminal A reference group)
+newdata$LumB_0_40 <- 0
+newdata$LumB_40_80 <- 0
+newdata$LumB_80_170 <- 0
+newdata$Basal_0_40 <- 0
+newdata$Basal_40_80 <- 0
+newdata$Basal_80_170 <- 0
+newdata$Her2_0_40 <- 0
+newdata$Her2_40_80 <- 0
+newdata$Her2_80_170 <- 0
+newdata$Normal_0_40 <- 0
+newdata$Normal_40_80 <- 0
+newdata$Normal_80_170 <- 0
+newdata$Claudin_low_0_40 <- 0
+newdata$Claudin_low_40_80 <- 0
+newdata$Claudin_low_80_170 <- 0
+
+# Assign most common stratum for prediction
+newdata$AgeGroup <- factor("60–69", levels = levels(model_df_td$AgeGroup))
+newdata$Neoplasm.Histologic.Grade <- factor("3", levels = levels(model_df_td$Neoplasm.Histologic.Grade))
+
+# Predict log-relative hazard
+log_hazard <- predict(cox_td_model, newdata = newdata, type = "lp")
+
+# Plot predicted hazard ratio vs. tumor size
+ggplot(data = newdata, aes(x = Tumor.Size, y = exp(log_hazard))) +
+  geom_line(size = 1.2) +
+  labs(title = "Estimated Hazard Ratio vs. Tumor Size",
+       y = "Hazard Ratio (relative to reference size)",
+       x = "Tumor Size (mm)") +
+  theme_minimal()
+
+```
+
+
+```{r}
+km_fit_capped <- survfit(Surv(time_capped, status_capped) ~ PAM50, data = model_df)
+ggsurvplot(km_fit_capped, data = model_df, pval = TRUE,
+           risk.table = TRUE,
+           title = "Kaplan-Meier Curve (Capped at 170 Months)",
+           legend.title = "PAM50 Subtype",
+           xlab = "Time (months)",
+           ylab = "Overall Survival Probability")
+```
+
+```{r}
+# install.packages("tableone") if not already installed
+library(tableone)
+
+# Define variables to summarize
+vars <- c("AgeGroup", "Tumor.Size", "Neoplasm.Histologic.Grade", "PAM50", "status", "time")
+
+# Create Table 1 stratified by PAM50 subtype
+table1 <- CreateTableOne(vars = vars, strata = "PAM50", data = model_df, factorVars = c("AgeGroup", "Neoplasm.Histologic.Grade"))
+
+# Print table
+print(table1, showAllLevels = TRUE, formatOptions = list(big.mark = ","))
+
+
+library(dplyr)
+
+model_df %>%
+  group_by(PAM50) %>%
+  summarise(n = n()) %>%
+  arrange(desc(n))
+
+
+model_df %>%
+  filter(time >= 170) %>%
+  group_by(PAM50) %>%
+  summarise(n = n()) %>%
+  arrange(desc(n))
+
+```
+
