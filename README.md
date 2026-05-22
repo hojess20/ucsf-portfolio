@@ -1,4 +1,5 @@
 ![My Photo](logo.png)
+
 [LinkedIn](https://www.linkedin.com/in/hojessica20/)|[GitHub](https://github.com/hojess20)|[Email](mailto:jho3@ucsf.edu)
 
 ## Hello!
