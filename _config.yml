@@ -4,3 +4,4 @@ url: "https://hojess20.github.io/ucsf-portfolio/"
 baseurl: ""               # leave empty for user site, '/repo' for project site
 author: Jessica Ho
 email: jessica.ho3@ucsf.edu
+logo: "/images/jho_pic.jpg"
